@@ -55,7 +55,7 @@ build_flags =
 #include <rclc_parameter/rclc_parameter.h>
 static const rclc_parameter_options_t parameter_options = {
     .notify_changed_over_dds = true,
-    .max_params = 4,
+    .max_params = 20,
     .allow_undeclared_parameters = true,
     .low_mem_mode = false};
 #endif
