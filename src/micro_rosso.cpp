@@ -8,14 +8,16 @@
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
+
+#ifndef TARGET_RP2040
 #include <rom/rtc.h>
+static RESET_REASON reset_reason_0;
+static RESET_REASON reset_reason_1;
+#endif
 
 #if defined(TRANSPORT_WIFI_STATIC_IP)
 #include <WiFi.h>
 #endif
-
-static RESET_REASON reset_reason_0;
-static RESET_REASON reset_reason_1;
 
 #if ROS_PARAMETER_SERVER
 rclc_parameter_server_t micro_rosso::param_server;
@@ -230,8 +232,10 @@ bool micro_rosso::setup(const char *rosname)
 
   D_println("Setting up micro_rosso... ");
 
+#ifndef TARGET_RP2040
   reset_reason_0 = rtc_get_reset_reason(0);
   reset_reason_1 = rtc_get_reset_reason(1);
+#endif
 
   ros2_node_name = rosname;
 
@@ -267,6 +271,7 @@ bool micro_rosso::setup(const char *rosname)
   return true;
 }
 
+#ifndef TARGET_RP2040
 static const char *reset_reason_string(const RESET_REASON reason)
 {
   switch (reason)
@@ -305,6 +310,7 @@ static const char *reset_reason_string(const RESET_REASON reason)
     return "";
   }
 }
+#endif
 
 static const char *ros_state_string(const ros_states state)
 {
@@ -503,6 +509,7 @@ static bool create_entities()
 
   micro_rosso::logger.log("ROS2 Connected.");
 
+#ifndef TARGET_RP2040
   if (reset_reason_0 > 0)
   {
     char reset_reason_str[50]{0};
@@ -517,6 +524,7 @@ static bool create_entities()
     micro_rosso::logger.log(reset_reason_str);
     reset_reason_1 = (RESET_REASON)0;
   }
+#endif
 
   micro_rosso::time_sync();
 
