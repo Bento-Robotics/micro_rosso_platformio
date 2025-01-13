@@ -19,12 +19,19 @@ static RESET_REASON reset_reason_1;
 #include <WiFi.h>
 #endif
 
+#if ROS_PARAMETER_SERVER
+rclc_parameter_server_t micro_rosso::param_server;
+#endif
+
 std::vector<publisher_descriptor *> micro_rosso::publishers;
 std::vector<subscriber_descriptor *> micro_rosso::subscribers;
 std::vector<service_descriptor *> micro_rosso::services;
 std::vector<client_descriptor *> micro_rosso::clients;
 std::vector<timer_descriptor *> micro_rosso::timers;
 std::vector<void (*)(ros_states)> micro_rosso::ros_state_listeners;
+#if ROS_PARAMETER_SERVER
+std::vector<void (*)(const Parameter *, const Parameter *)> micro_rosso::parameter_change_listeners;
+#endif
 
 timer_descriptor micro_rosso::timer_control;
 timer_descriptor micro_rosso::timer_report;
@@ -53,9 +60,9 @@ static unsigned long long ros_time_offset_ms;
     rcl_ret_t temp_rc = fn;                           \
     if ((temp_rc != RCL_RET_OK))                      \
     {                                                 \
-      D_print("micro_rosso failed on [line:code]: "); \
+      D_print("micro_rosso.cpp failed on [line:code]: "); \
       D_print((int)__LINE__);                         \
-      D_print(" ");                                   \
+      D_print(":");                                   \
       D_print((int)temp_rc);                          \
       D_println();                                    \
       rcutils_reset_error();                          \
@@ -141,6 +148,9 @@ static void shrink_to_fit()
     timer_descriptor *t = micro_rosso::timers[i];
     t->callbacks.shrink_to_fit();
   }
+#if ROS_PARAMETER_SERVER
+  micro_rosso::parameter_change_listeners.shrink_to_fit();
+#endif
 }
 
 static void timer_handler_control(rcl_timer_t *timer, int64_t last_call_time)
@@ -160,6 +170,58 @@ static void timer_handler_report(rcl_timer_t *timer, int64_t last_call_time)
   }
   return;
 }
+
+#if ROS_PARAMETER_SERVER
+static void print_parameter_desc(const Parameter *p)
+{
+  if (p == NULL)
+  {
+    D_print("NULL");
+  }
+  else
+  {
+    D_print(p->name.data);
+    switch (p->value.type)
+    {
+    case RCLC_PARAMETER_BOOL:
+      D_print("=(bool)");
+      D_print(p->value.bool_value);
+      break;
+    case RCLC_PARAMETER_INT:
+      D_print("=(int)");
+      D_print(p->value.integer_value);
+      break;
+    case RCLC_PARAMETER_DOUBLE:
+      D_print("=(double)");
+      D_print(p->value.double_value);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+bool on_parameter_changed(const Parameter *old_param, const Parameter *new_param, void *context)
+{
+  (void)context;
+  if (old_param == NULL && new_param == NULL)
+  {
+    D_println("ERROR: on_parameter_changed, both parameters are NULL");
+    return false;
+  }
+  D_print("parameter change: ");
+  print_parameter_desc(old_param);
+  D_print(" -> ");
+  print_parameter_desc(new_param);
+  D_println();
+
+  for (int i = 0; i < micro_rosso::parameter_change_listeners.size(); i++)
+  {
+    micro_rosso::parameter_change_listeners[i](old_param, new_param);
+  }
+  return true;
+}
+#endif
 
 bool micro_rosso::setup(const char *rosname)
 {
@@ -187,6 +249,15 @@ bool micro_rosso::setup(const char *rosname)
     D_println("FAIL logger.setup()");
     return false;
   };
+
+  D_print("RMW_UXRCE_MAX_PUBLISHERS: ");
+  D_println(RMW_UXRCE_MAX_PUBLISHERS);
+  D_print("RMW_UXRCE_MAX_SUBSCRIPTIONS: ");
+  D_println(RMW_UXRCE_MAX_SUBSCRIPTIONS);
+  D_print("RMW_UXRCE_MAX_SERVICES: ");
+  D_println(RMW_UXRCE_MAX_SERVICES);
+  D_print("RMW_UXRCE_MAX_CLIENTS: ");
+  D_println(RMW_UXRCE_MAX_CLIENTS);
 
   micro_rosso::timer_control.timeout_ns = RCL_MS_TO_NS(TIMER_CONTROL_MS);
   micro_rosso::timer_control.timer_handler = timer_handler_control;
@@ -241,23 +312,47 @@ static const char *reset_reason_string(const RESET_REASON reason)
 }
 #endif
 
+static const char *ros_state_string(const ros_states state)
+{
+  switch (state)
+  {
+  case WAITING_AGENT:
+    return "WAITING_AGENT";
+  case AGENT_AVAILABLE:
+    return "AGENT_AVAILABLE";
+  case AGENT_CONNECTED:
+    return "AGENT_CONNECTED";
+  case AGENT_DISCONNECTED:
+    return "AGENT_DISCONNECTED";
+  default:
+    return "";
+  }
+};
+
 // Functions create_entities and destroy_entities can take several seconds.
 // In order to reduce this rebuild the library with
 // - RMW_UXRCE_ENTITY_CREATION_DESTROY_TIMEOUT=0
 // - UCLIENT_MAX_SESSION_CONNECTION_ATTEMPTS=3
 static bool create_entities()
 {
-  D_println("Creating ROS2 entities... ");
+  D_print("Creating ROS2 entities for node: ");
+  D_println(ros2_node_name);
 
   shrink_to_fit();
   D_print("publishers: ");
   D_println(micro_rosso::publishers.size());
   D_print("subscriptions: ");
   D_println(micro_rosso::subscribers.size());
-  D_print("services: ");
-  D_println(micro_rosso::services.size());
   D_print("clients: ");
   D_println(micro_rosso::clients.size());
+  D_print("services: ");
+  D_println(micro_rosso::services.size());
+#if ROS_PARAMETER_SERVER
+  D_print("parameter server services: ");
+  D_println(RCLC_EXECUTOR_PARAMETER_SERVER_HANDLES);
+  D_print("parameter change listeners: ");
+  D_println(micro_rosso::parameter_change_listeners.size());
+#endif
   D_print("state listeners: ");
   D_println(micro_rosso::ros_state_listeners.size());
 
@@ -305,18 +400,14 @@ static bool create_entities()
     timer_descriptor *t = micro_rosso::timers[i];
     D_print("+timer (ms): ");
     D_println(t->timeout_ns / 1000000);
-    //deprecated:
-    //RCCHECK(rclc_timer_init_default(
-    //    &(t->timer), &support, t->timeout_ns, t->timer_handler));
+    // deprecated:
+    // RCCHECK(rclc_timer_init_default(
+    //     &(t->timer), &support, t->timeout_ns, t->timer_handler));
     RCCHECK(rclc_timer_init_default2(
         &(t->timer), &support, t->timeout_ns, t->timer_handler, true));
   }
 
   // create services
-  if (micro_rosso::services.size() > 1)
-  {
-    D_println("WARNING: verify DRMW_UXRCE_MAX_SERVICES in colcon.meta ");
-  }
   for (int i = 0; i < micro_rosso::services.size(); i++)
   {
     service_descriptor *s = micro_rosso::services[i];
@@ -336,7 +427,7 @@ static bool create_entities()
     }
   }
 
-  // create servce clients
+  // create service clients
   for (int i = 0; i < micro_rosso::clients.size(); i++)
   {
     client_descriptor *c = micro_rosso::clients[i];
@@ -356,6 +447,14 @@ static bool create_entities()
     }
   }
 
+#if ROS_PARAMETER_SERVER
+  // create service for parameter service
+  D_println("+parameter server");
+  RCCHECK(rclc_parameter_server_init_with_option(
+      &micro_rosso::param_server, &node, &parameter_options));
+  // RCCHECK(rclc_parameter_server_init_default(&param_server, &node));
+#endif
+
   // create executor
   executor = rclc_executor_get_zero_initialized_executor();
   size_t n_executors =
@@ -363,6 +462,11 @@ static bool create_entities()
       micro_rosso::services.size() +
       micro_rosso::clients.size() +
       micro_rosso::subscribers.size();
+
+#if ROS_PARAMETER_SERVER
+  n_executors += RCLC_EXECUTOR_PARAMETER_SERVER_HANDLES;
+  // RCLC_EXECUTOR_PARAMETER_SERVER_HANDLES ?
+#endif
 
   D_print("Allocating executors: ");
   D_println(n_executors);
@@ -395,6 +499,11 @@ static bool create_entities()
         &executor, &(c->client), c->response, c->callback));
   }
 
+#if ROS_PARAMETER_SERVER
+  rclc_executor_add_parameter_server(
+      &executor, &micro_rosso::param_server, on_parameter_changed);
+#endif
+
   D_println("...Done.");
   delay(500);
 
@@ -424,7 +533,7 @@ static bool create_entities()
 
 static void destroy_entities()
 {
-  D_println("Destroying ROS2 entities... ");
+  D_print("Destroying ROS2 entities... ");
 
   rmw_context_t *rmw_context = rcl_context_get_rmw_context(&support.context);
   (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
@@ -464,6 +573,10 @@ static void destroy_entities()
   RCNOCHECK(rcl_node_fini(&node));
   RCNOCHECK(rclc_support_fini(&support));
 
+#if ROS_PARAMETER_SERVER
+  RCNOCHECK(rclc_parameter_server_fini(&micro_rosso::param_server, &node););
+#endif
+
   D_println("...Done.");
 }
 
@@ -500,7 +613,7 @@ void micro_rosso::loop()
   if (ros_state != ros_state_last)
   {
     D_print("ROS2 state: ");
-    D_println(ros_state);
+    D_println(ros_state_string(ros_state));
 
     for (int i = 0; i < micro_rosso::ros_state_listeners.size(); i++)
     {

@@ -12,7 +12,7 @@ First, you will need [ROS2 installed](https://docs.ros.org/en/dashing/Installati
 
 Then you have to install micro-ros. There are two ways: native build (harder) or a docker image (easier).
 
-### micro-ros from a snap
+### micro-ros from docker
 
 You can run a micro-ros installation directly from a docker image. For example, when using serial transport to communicate with the microcontroller (change the `humble` for `jazzy` as needed):
 
@@ -115,21 +115,48 @@ void loop() {
 
 The `board_microros_transport` field specifies how the board will communicate with the agent. This example uses the Serial transport, which is the first UART or the same USB link used to flash the board. You can [change the transport](https://github.com/micro-ROS/micro_ros_platformio?tab=readme-ov-file#transport-configuration). Each possible transport (serial, Wi-Fi, etc.) must be configured in your code in the setup() method before starting micro_rosso.
 
-### Adding modules
+## Configuring micro_rosso
 
-We recommend placing your project modules in the /lib/ project folder.
+The configuration for micro_rosso is stored in [micro_rosso_config.h](include/micro_rosso_config.h) header. Most variables can be manipulated from your `platformio.ini` file through build flags. For example, to disable the set_time functionality, you can add the following entry:
 
-For external modules, add the corresponding entry in [`lib_deps`](https://docs.platformio.org/en/latest/projectconf/sections/env/options/library/lib_deps.html).
+```ini
+build_flags =
+    -DUSE_SET_TIME=false
+```
+
+Another important element to configure is the maximum number of publishers, services, subscriptions, etc. For this, first add a `myproject.meta` file, for example:
+
+```yaml
+{
+    "names": {
+        "rmw_microxrcedds": {
+            "cmake-args": [
+                "-DRMW_UXRCE_MAX_NODES=1",
+                "-DRMW_UXRCE_MAX_PUBLISHERS=10",
+                "-DRMW_UXRCE_MAX_SUBSCRIPTIONS=10",
+                "-DRMW_UXRCE_MAX_SERVICES=5",
+                "-DRMW_UXRCE_MAX_CLIENTS=0",
+            ]
+        }
+    }
+}
+```
+
+The reference this file from your `platformio.ini` file:
+
+```ini
+board_microros_user_meta = myproject.meta
+```
 
 ## How to use modules
 
 First, we will show how to use a third-party module; later, we will describe how to create your own.
 
-A module is imported as a standard PlatformIO library in any standard way. As an example, we will import the MPU6050 module from GitHub, adding the following entry to the platformio.ini` file:
+A module is imported as a standard PlatformIO library in any standard way. As an example, we will import the MPU6050 module from GitHub, adding the following [entry](https://docs.platformio.org/en/latest/projectconf/sections/env/options/library/lib_deps.html) to the `platformio.ini` file:
 
 ```ini
 lib_deps = 
-    https://github.com/xopxe/micro_rosso_platformio.git
+    xopxe/micro_rosso @ ^0.1.4
     https://github.com/xopxe/micro_rosso_mpu6050.git
 ```
 
@@ -168,17 +195,15 @@ build_flags =
 
 ## How to write a module
 
-A micro\_rosso module is a mostly static object that provides a setup method where it registers ros2 resources using `micro_rosso.h`. It then uses micro_ros_platformio and other modules to implement its functionality.
-
-Things a module can do:
-
-### Subscribe to topics
-
-You have various options for where to place libraries in your project:
+A micro\_rosso module is a mostly static object that provides a setup method where it registers ros2 resources using `micro_rosso.h`. It then uses micro_ros_platformio and other modules to implement its functionality. You have various options for where to place libraries in your project:
 
 * Both .h and .cpp files in the src/ directory. (quick and dirty)
 * The .h in the include/ folder, the .cpp in src/ (good for when you are writing a library you will publish)
 * In a lib/my_module/ folder (good for private modules that only make sense for your project.)
+
+Things a module can do:
+
+### Subscribe to topics
 
 The following example is derived from the [`mobility_tracked`](https://github.com/xopxe/oruga/tree/main/lib/mobility_tracked) module. It will subscribe to `/cmd_vel` topics of type `cmd_vel`.
 
@@ -228,7 +253,7 @@ bool MyModule::setup() {
 
 ### Publish topics
 
-The following example is derived from the `ticker` module. It will publish to `/tick` topics of type `int32`.
+The following example is derived from the `ticker` module. It will publish (by default)`/tick` topics, of type `int32`.
 
 In `my_module.cpp` create and register the publisher. We will create a static object to store the message to be sent and a publisher object:
 
@@ -307,7 +332,7 @@ bool MyModule::setup() {
 
 ### Serve services
 
-See the example in the `sync_time` module to create and announce a service. First, create a service descriptor and the request and response objects:
+See the example in the `sync_time` module for creating and announcing a service. First, create a service descriptor and the request and response objects:
 
 ```cpp
 static service_descriptor my_service;
@@ -368,6 +393,113 @@ bool MyModule::setup() {
   return true;
 }
 ```
+
+### Use the parameter server
+
+You can enable the micro-ros [parameter server](https://micro.ros.org/docs/tutorials/programming_rcl_rclc/parameters/) by setting the appropriate compiler flag in your `platformio.ini` file:
+
+```ini
+build_flags =
+    -DROS_PARAMETER_SERVER=true
+```
+
+Notice that the parameter server uses additional slots (6?) from the available services. See above in the "## Configuring micro_rosso" section to increase the number of services.
+
+To react to the creation, modification, and removal of configuration parameters, you must subscribe to the `parameter_change_listeners` list:
+
+```cpp
+static void parameter_change_cb(const Parameter *old_param, const Parameter *new_param) {
+  if (old_param == NULL) {
+    if (new_param != NULL && strcmp(new_param->name.data, "parameter1") == 0) {
+      // parameter1 created
+    }
+  } else {
+    if (new_param == NULL) {
+      // parameter1 deleted
+    } else if (strcmp(new_param->name.data, "parameter1") == ) {
+      // parameter1 updated
+    }
+  }
+}
+
+bool MyModule::setup()
+{
+  ...
+  micro_rosso::parameter_change_listeners.push_back(parameter_change_cb);
+  ...
+  return true;
+}
+```
+
+You might want to create the variables from inside your firmware, and give them initial values. You must do that from a ros status change event, once the ros is connected. For that, you must register a ros status listener as described above and add the parameter creation code:
+
+```cpp
+static void ros_state_cb(ros_states state)
+{
+  switch (state)
+  {
+  case AGENT_CONNECTED:
+    rclc_add_parameter(&micro_rosso::param_server, "parameter1", RCLC_PARAMETER_INT);
+    rclc_parameter_set_int(&micro_rosso::param_server, "parameter1", 10);
+    break;
+  case AGENT_DISCONNECTED:
+    rclc_delete_parameter(&micro_rosso::param_server, "parameter1");
+    break;
+  default:
+    break;
+  }
+}
+```
+
+Remember that the micro-ros parameter server only supports `int64`, `double`, and `bool` parameters.
+
+### Enabling persistence for the parameter server
+
+The `parameter_persist` module allows parameter values to be preserved across board reboots. To enable it, load the module the usual way. In your `main.cpp` add:
+
+```cpp
+#include "parameter_persist.h"
+ParameterPersist persist;
+...
+void setup() {
+  ...
+  if (!persist.setup()) {
+    D_println("FAIL persist.setup()");
+  };
+}
+```
+
+You can specify what parameters to persist using two attributes in the parameter_persits modules:
+
+* `bool ParameterPersist::persist_all`: if set to true, all parameters will be persisted. If set to false, only the ones in the following list will:
+
+* `std::vector<char *> ParameterPersist::persist_list`: a list of strings with the names of the parameters to persist.
+
+When using persistence, you must assign a default value to a parameter only when it is not already initialized from flash:
+
+```cpp
+static void ros_state_cb(ros_states state)
+{
+  int rc;
+  switch (state)
+  {
+  case AGENT_CONNECTED:
+    rc = rclc_add_parameter(&micro_rosso::param_server, "parameter1", RCLC_PARAMETER_INT);
+    if (rc == 0) {
+      // the parameter was added successfully, so it wasn't created before. Assign a value:
+      RCNOCHECK(rclc_parameter_set_int(&micro_rosso::param_server, "parameter1", 10));
+    }
+    break;
+  case AGENT_DISCONNECTED:
+    rclc_delete_parameter(&micro_rosso::param_server, "parameter1");
+    break;
+  default:
+    break;
+  }
+}
+```
+
+NOTE: This service uses the portable Arduino `Preferences` library. Unfortunately, this library does not support discovering the data stored on Flash. So, for this purpose the service uses the ESP32native nvs.h library. If you are porting this system to another platform, you will have to replace that code.
 
 ### TODO consume services
 
